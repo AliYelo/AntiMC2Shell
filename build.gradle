@@ -1,0 +1,79 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+base { archivesName = 'antim2shell' }
+
+repositories { mavenCentral() }
+
+loom {
+    splitEnvironmentSourceSets()
+    mods {
+        antim2shell {
+            sourceSet sourceSets.main
+            sourceSet sourceSets.client
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${loader_version}"
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(25)
+    withSourcesJar()
+}
+tasks.withType(JavaCompile).configureEach { options.release = 25 }
+
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand version: project.version }
+}
+
+tasks.named('wrapper') {
+    gradleVersion = '9.8.2'
+    distributionType = Wrapper.DistributionType.BIN
+    distributionSha256Sum = '21bd5da2de49b642904077f38c0efdc7778e92b3ed0889392dca61b97e389607'
+}
+
+// Runs the real Fabric/Mixin transformation pipeline, then exits before game startup.
+// The harness is a separate mod and is never included in the released jar.
+sourceSets {
+    securityTest {
+        compileClasspath += sourceSets.client.compileClasspath + sourceSets.client.output + sourceSets.main.output
+        runtimeClasspath += sourceSets.client.runtimeClasspath + sourceSets.client.output + sourceSets.main.output
+    }
+}
+
+tasks.register('securityTestJar', Jar) {
+    archiveClassifier = 'security-tests'
+    destinationDirectory = layout.buildDirectory.dir('security-tests')
+    from sourceSets.securityTest.output
+}
+
+tasks.register('securityTest', JavaExec) {
+    dependsOn tasks.named('jar'), tasks.named('securityTestJar')
+    // Exercise the packaged release, not loose production class files.
+    classpath = sourceSets.client.runtimeClasspath - sourceSets.client.output - sourceSets.main.output
+    classpath += files(tasks.named('jar'))
+    mainClass = 'net.fabricmc.loader.impl.launch.knot.KnotClient'
+    javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(25) }
+    workingDir = layout.buildDirectory.dir('security-test-run').get().asFile
+    doFirst {
+        workingDir.mkdirs()
+        systemProperty 'fabric.addMods', tasks.named('jar').get().archiveFile.get().asFile.absolutePath + File.pathSeparator + tasks.named('securityTestJar').get().archiveFile.get().asFile.absolutePath
+        def vanillaJar = new File(gradle.gradleUserHomeDir, "caches/fabric-loom/${minecraft_version}/minecraft-client.jar")
+        if (!vanillaJar.isFile()) throw new GradleException("Missing official client JAR for security audit: ${vanillaJar}")
+        systemProperty 'antim2shell.minecraftJar', vanillaJar.absolutePath
+    }
+    systemProperty 'antim2shell.securityTest', 'true'
+    systemProperty 'antim2shell.testReport', layout.buildDirectory.file('reports/security-test.txt').get().asFile.absolutePath
+    systemProperty 'fabric.development', 'false'
+    systemProperty 'mixin.debug.countInjections', 'true'
+    systemProperty 'mixin.debug.export', 'true'
+    systemProperty 'mixin.debug.export.decompile', 'false'
+    systemProperty 'java.awt.headless', 'true'
+}
+tasks.named('check') { dependsOn tasks.named('securityTest') }
